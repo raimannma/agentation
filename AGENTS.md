@@ -2,8 +2,8 @@
 
 Monorepo containing:
 
-1. **npm package** (`package/`) - See `package/CLAUDE.md`
-2. **Website/docs** (`package/example/`) - See `package/example/CLAUDE.md`
+1. **npm package** (`package/`) - See `package/AGENTS.md`
+2. **Website/docs** (`package/example/`) - See `package/example/AGENTS.md`
 
 ## What is Agentation?
 
