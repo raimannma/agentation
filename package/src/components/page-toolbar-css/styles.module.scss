@@ -186,6 +186,15 @@
     Roboto,
     sans-serif;
   pointer-events: none;
+  // The toolbar (including the always-mounted, opacity-hidden settings panel)
+  // is portaled into the host page, so a page-level text selection (triple-click
+  // / select-all) can extend across it and serialize toolbar UI text — e.g. the
+  // empty webhook textarea's "Webhook URL" placeholder. Mark the chrome
+  // unselectable so it is excluded from host-page selections; editable fields
+  // keep their own caret/editing selection regardless of this rule.
+  // See: https://github.com/benjitaylor/agentation/issues/184
+  user-select: none;
+  -webkit-user-select: none;
   transition:
     left 0s,
     top 0s,
