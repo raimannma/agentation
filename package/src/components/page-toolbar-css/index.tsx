@@ -469,7 +469,7 @@ export function PageFeedbackToolbarCSS({
   const rearrangeSelectedIdsRef = useRef<Set<string>>(new Set());
   // Track start positions for cross-drag (set when drag starts)
   const crossDragStartRef = useRef<Map<string, { x: number; y: number }> | null>(null);
-  const designExitTimer = useRef<ReturnType<typeof originalSetTimeout>>();
+  const designExitTimer = useRef<ReturnType<typeof originalSetTimeout> | undefined>(undefined);
 
   // Delay blank canvas .visible by one frame when becoming visible so CSS transition fires
   const canvasShouldBeVisible = isDesignMode && isActive && !designOverlayExiting && blankCanvas;
@@ -489,7 +489,7 @@ export function PageFeedbackToolbarCSS({
   const placementAnnotationMap = useRef(new Map<string, string>()); // placementId → server annotationId
   const placementSyncedTextMap = useRef(new Map<string, string | undefined>()); // placementId → last-synced p.text
   const rearrangeAnnotationMap = useRef(new Map<string, string>()); // sectionId → server annotationId
-  const rearrangeDebounceTimer = useRef<ReturnType<typeof originalSetTimeout>>();
+  const rearrangeDebounceTimer = useRef<ReturnType<typeof originalSetTimeout> | undefined>(undefined);
 
   // Draw mode state
   const [isDrawMode, setIsDrawMode] = useState(false);

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, type JSX } from "react";
 import "./FeaturesDemo.css";
 
 type FeatureKey = "text-selection" | "element-click" | "multi-select" | "area-selection" | "animation-pause";
