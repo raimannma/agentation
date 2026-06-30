@@ -654,3 +654,64 @@ export function getFullElementPath(target: HTMLElement): string {
 
   return parts.join(" > ");
 }
+
+// =============================================================================
+// Pierce / Deep-select Resolution
+// =============================================================================
+
+/**
+ * True when an element renders its own direct text — a child text node with
+ * non-whitespace content. Text inside descendant elements does not count, so
+ * a leaf like `<button>Buy</button>` qualifies but an empty wrapper such as
+ * `<div><button>…</button></div>` does not.
+ */
+export function hasDirectTextContent(el: HTMLElement): boolean {
+  for (const child of el.childNodes) {
+    if (child.nodeType === Node.TEXT_NODE && child.textContent?.trim()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** A candidate element at a pierce point, with the signals used to rank it. */
+export type PierceCandidate = {
+  element: HTMLElement;
+  /** Element renders its own direct text (see hasDirectTextContent). */
+  hasText: boolean;
+  /** Element is actually painted (not display:none / visibility:hidden / opacity:0). */
+  visible: boolean;
+  /** Rendered footprint in CSS px² (width * height). */
+  area: number;
+};
+
+/**
+ * Resolves the "real" content element under a pierce point from the stack of
+ * elements at that point (topmost first, as document.elementsFromPoint returns
+ * them). Skips invisible overlays, zero-area nodes, and empty wrapper
+ * containers, returning the element a human would consider the target.
+ *
+ * Resolution order:
+ *   1. topmost visible candidate that renders its own text;
+ *   2. otherwise the smallest visible candidate — under transparent overlays
+ *      and empty wrappers the actual content (button, image, swatch, bar) is
+ *      the tightest box;
+ *   3. otherwise the topmost candidate, so a result is always returned.
+ */
+export function resolvePierceTarget(
+  candidates: PierceCandidate[],
+): HTMLElement | null {
+  if (candidates.length === 0) return null;
+
+  const visible = candidates.filter((c) => c.visible && c.area > 0);
+  if (visible.length === 0) return candidates[0].element;
+
+  const withText = visible.find((c) => c.hasText);
+  if (withText) return withText.element;
+
+  let smallest = visible[0];
+  for (const c of visible) {
+    if (c.area < smallest.area) smallest = c;
+  }
+  return smallest.element;
+}
