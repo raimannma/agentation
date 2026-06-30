@@ -199,6 +199,10 @@ const isPrimaryMultiSelectModifierActive = (event: {
   ctrlKey: boolean;
 }): boolean => event.metaKey || event.ctrlKey;
 
+// Pencil cursor for draw mode — mirrors the toolbar pencil icon with a white
+// outline for contrast. Hotspot sits at the pencil tip (~4,16 in the 20x20 space).
+const PENCIL_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M15.8787 4.87868C16.6597 4.09763 17.9261 4.09763 18.7071 4.87868L19.1213 5.29289C19.9024 6.07394 19.9024 7.34027 19.1213 8.12132L9.58579 17.6569C9.21071 18.0319 8.70201 18.2426 8.17157 18.2426H5.75V15.8284C5.75 15.298 5.96071 14.7893 6.33579 14.4142L15.8787 4.87868Z' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M15.8787 4.87868C16.6597 4.09763 17.9261 4.09763 18.7071 4.87868L19.1213 5.29289C19.9024 6.07394 19.9024 7.34027 19.1213 8.12132L9.58579 17.6569C9.21071 18.0319 8.70201 18.2426 8.17157 18.2426H5.75V15.8284C5.75 15.298 5.96071 14.7893 6.33579 14.4142L15.8787 4.87868Z' stroke='%23222' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M14.5 6.5L17.5 9.5' stroke='%23222' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") 4 16, crosshair`;
+
 export const COLOR_OPTIONS = [
   { id: "indigo",  label: "Indigo",  srgb: "#6155F5", p3: "color(display-p3 0.38 0.33 0.96)" },
   { id: "blue",    label: "Blue",    srgb: "#0088FF", p3: "color(display-p3 0.00 0.53 1.00)" },
@@ -1925,6 +1929,19 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
     }
   }, [hoveredDrawingIdx, isActive]);
 
+  // Pencil cursor for the draw canvas (setProperty to override the !important rule)
+  useEffect(() => {
+    const canvas = drawCanvasRef.current;
+    if (!canvas) return;
+    if (isDrawMode && hoveredDrawingIdx == null) {
+      canvas.style.setProperty("cursor", PENCIL_CURSOR, "important");
+    } else if (isDrawMode) {
+      canvas.style.setProperty("cursor", "pointer", "important");
+    } else {
+      canvas.style.removeProperty("cursor");
+    }
+  }, [isDrawMode, hoveredDrawingIdx]);
+
   // Handle mouse move
   useEffect(() => {
     if (!isActive || pendingAnnotation || isDrawMode || isDesignMode) return;
@@ -3526,7 +3543,13 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
           }
           return;
         }
-        // Exit draw mode first if active
+        // In draw mode with a popup open: close the popup but stay in draw mode
+        if (isDrawMode && (pendingAnnotation || editingAnnotation)) {
+          if (pendingAnnotation) cancelAnnotation();
+          if (editingAnnotation) cancelEditAnnotation();
+          return;
+        }
+        // Exit draw mode if active (no popup open)
         if (isDrawMode) {
           setIsDrawMode(false);
           return;
@@ -3635,6 +3658,9 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
     designPlacements,
     rearrangeState,
     pendingAnnotation,
+    editingAnnotation,
+    cancelAnnotation,
+    cancelEditAnnotation,
     annotations.length,
     settings.webhookUrl,
     webhookUrl,
