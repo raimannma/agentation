@@ -40,7 +40,10 @@ import {
   getAccessibilityInfo,
   getNearbyElements,
   closestCrossingShadow,
+  hasDirectTextContent,
+  resolvePierceTarget,
 } from "../../utils/element-identification";
+import type { PierceCandidate } from "../../utils/element-identification";
 import {
   loadAnnotations,
   loadAllAnnotations,
@@ -139,6 +142,7 @@ type HoverInfo = {
   elementPath: string;
   rect: DOMRect | null;
   reactComponents?: string | null;
+  isPiercing?: boolean;
 };
 
 type PendingMultiSelectElement = {
@@ -395,6 +399,53 @@ function elementsFromPointWithIframes(x: number, y: number): HTMLElement[] {
   }
 
   return results;
+}
+
+/**
+ * Whether an element is actually painted — not display:none, visibility:hidden,
+ * or opacity:0 (including via an ancestor). Pierce mode uses this to skip the
+ * invisible animation/overlay ghosts that intercept the pointer. Prefers the
+ * native checkVisibility() and falls back to walking computed styles.
+ */
+function isElementPaintable(el: HTMLElement): boolean {
+  if (typeof el.checkVisibility === "function") {
+    return el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+  }
+  let current: HTMLElement | null = el;
+  while (current && current !== document.body) {
+    const style = window.getComputedStyle(current);
+    if (
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      style.opacity === "0"
+    ) {
+      return false;
+    }
+    current = current.parentElement;
+  }
+  return true;
+}
+
+/**
+ * Pierce mode: with the primary modifier (Cmd/Ctrl) held, resolve the real
+ * content element under the pointer by looking through the whole stack of
+ * elements at the point, skipping invisible overlays and empty wrappers.
+ * Opt-in only — plain hover keeps using deepElementFromPoint and is unchanged.
+ */
+function pierceElementFromPoint(x: number, y: number): HTMLElement | null {
+  const candidates: PierceCandidate[] = [];
+  for (const el of elementsFromPointWithIframes(x, y)) {
+    if (el === document.documentElement || el === document.body) continue;
+    if (closestCrossingShadow(el, "[data-feedback-toolbar]")) continue;
+    const rect = el.getBoundingClientRect();
+    candidates.push({
+      element: el,
+      hasText: hasDirectTextContent(el),
+      visible: isElementPaintable(el),
+      area: rect.width * rect.height,
+    });
+  }
+  return resolvePierceTarget(candidates);
 }
 
 function isElementFixed(element: HTMLElement): boolean {
@@ -2107,25 +2158,30 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
     }
   }, [isDrawMode, hoveredDrawingIdx]);
 
-  // Handle mouse move
+  // Handle mouse move (+ live re-evaluation when the pierce modifier is
+  // pressed/released without moving the pointer)
   useEffect(() => {
     if (!isActive || pendingAnnotation || isDrawMode || isDesignMode) return;
 
-    const handleMouseMove = (e: MouseEvent) => {
-      // Use composedPath to get actual target inside shadow DOM
-      const target = (e.composedPath()[0] || e.target) as HTMLElement;
-      if (closestCrossingShadow(target, "[data-feedback-toolbar]")) {
-        setHoverInfo(null);
-        return;
-      }
+    const lastMouse = { x: 0, y: 0, hasMoved: false };
 
-      const elementUnder = deepElementFromPoint(e.clientX, e.clientY);
+    const evaluateHover = (clientX: number, clientY: number, piercing: boolean) => {
+      const elementUnder = piercing
+        ? pierceElementFromPoint(clientX, clientY)
+        : deepElementFromPoint(clientX, clientY);
       if (
         !elementUnder ||
         closestCrossingShadow(elementUnder, "[data-feedback-toolbar]")
       ) {
         setHoverInfo(null);
         return;
+      }
+
+      // Only flag piercing when it actually changes the target, so the dashed
+      // indicator appears solely when the modifier reaches a deeper element.
+      let effectivePiercing = piercing;
+      if (piercing && deepElementFromPoint(clientX, clientY) === elementUnder) {
+        effectivePiercing = false;
       }
 
       const { name, elementName, path, reactComponents } =
@@ -2138,12 +2194,40 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
         elementPath: path,
         rect,
         reactComponents,
+        isPiercing: effectivePiercing,
       });
-      setHoverPosition({ x: e.clientX, y: e.clientY });
+      setHoverPosition({ x: clientX, y: clientY });
+    };
+
+    const handleMouseMove = (e: MouseEvent) => {
+      // Use composedPath to get actual target inside shadow DOM
+      const target = (e.composedPath()[0] || e.target) as HTMLElement;
+      if (closestCrossingShadow(target, "[data-feedback-toolbar]")) {
+        setHoverInfo(null);
+        return;
+      }
+      lastMouse.x = e.clientX;
+      lastMouse.y = e.clientY;
+      lastMouse.hasMoved = true;
+      evaluateHover(e.clientX, e.clientY, e.metaKey || e.ctrlKey);
+    };
+
+    // Toggling Cmd/Ctrl re-resolves the current point so the highlight jumps to
+    // (or back from) the pierced element without requiring a mouse move.
+    const handleModifierChange = (e: KeyboardEvent) => {
+      if ((e.key === "Meta" || e.key === "Control") && lastMouse.hasMoved) {
+        evaluateHover(lastMouse.x, lastMouse.y, e.metaKey || e.ctrlKey);
+      }
     };
 
     document.addEventListener("mousemove", handleMouseMove);
-    return () => document.removeEventListener("mousemove", handleMouseMove);
+    document.addEventListener("keydown", handleModifierChange);
+    document.addEventListener("keyup", handleModifierChange);
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("keydown", handleModifierChange);
+      document.removeEventListener("keyup", handleModifierChange);
+    };
   }, [isActive, pendingAnnotation, isDrawMode, isDesignMode, effectiveReactMode, drawStrokes]);
 
   // Start editing an annotation (right-click or click on drawing stroke)
@@ -2221,7 +2305,10 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
         e.preventDefault();
         e.stopPropagation();
 
-        const elementUnder = deepElementFromPoint(e.clientX, e.clientY);
+        // The modifier is held, so pierce mode is active during the hover that
+        // precedes this click — pick the same pierced element the highlight
+        // showed rather than the topmost overlay.
+        const elementUnder = pierceElementFromPoint(e.clientX, e.clientY);
         if (!elementUnder) return;
 
         const rect = elementUnder.getBoundingClientRect();
@@ -4631,6 +4718,7 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
                   height: hoverInfo.rect.height,
                   borderColor: "color-mix(in srgb, var(--agentation-color-accent) 50%, transparent)",
                   backgroundColor: "color-mix(in srgb, var(--agentation-color-accent) 4%, transparent)",
+                  ...(hoverInfo.isPiercing ? { borderStyle: "dashed" } : {}),
                 }}
               />
             )}
