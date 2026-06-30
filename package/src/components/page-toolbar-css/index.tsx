@@ -140,6 +140,14 @@ type HoverInfo = {
   reactComponents?: string | null;
 };
 
+type PendingMultiSelectElement = {
+  element: HTMLElement;
+  rect: DOMRect;
+  name: string;
+  path: string;
+  reactComponents?: string;
+};
+
 export type OutputDetailLevel = "compact" | "standard" | "detailed" | "forensic";
 // ReactComponentMode is now derived from outputDetail when reactEnabled is true
 export type ReactComponentMode = "smart" | "filtered" | "all" | "off";
@@ -185,6 +193,15 @@ const OUTPUT_TO_REACT_MODE: Record<OutputDetailLevel, ReactComponentMode> = {
   detailed: "smart",
   forensic: "all",
 };
+
+const isPrimaryMultiSelectModifierActive = (event: {
+  metaKey: boolean;
+  ctrlKey: boolean;
+}): boolean => event.metaKey || event.ctrlKey;
+
+// Pencil cursor for draw mode — mirrors the toolbar pencil icon with a white
+// outline for contrast. Hotspot sits at the pencil tip (~4,16 in the 20x20 space).
+const PENCIL_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M15.8787 4.87868C16.6597 4.09763 17.9261 4.09763 18.7071 4.87868L19.1213 5.29289C19.9024 6.07394 19.9024 7.34027 19.1213 8.12132L9.58579 17.6569C9.21071 18.0319 8.70201 18.2426 8.17157 18.2426H5.75V15.8284C5.75 15.298 5.96071 14.7893 6.33579 14.4142L15.8787 4.87868Z' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M15.8787 4.87868C16.6597 4.09763 17.9261 4.09763 18.7071 4.87868L19.1213 5.29289C19.9024 6.07394 19.9024 7.34027 19.1213 8.12132L9.58579 17.6569C9.21071 18.0319 8.70201 18.2426 8.17157 18.2426H5.75V15.8284C5.75 15.298 5.96071 14.7893 6.33579 14.4142L15.8787 4.87868Z' stroke='%23222' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M14.5 6.5L17.5 9.5' stroke='%23222' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") 4 16, crosshair`;
 
 export const COLOR_OPTIONS = [
   { id: "indigo",  label: "Indigo",  srgb: "#6155F5", p3: "color(display-p3 0.38 0.33 0.96)" },
@@ -232,22 +249,151 @@ injectAgentationColorTokens();
 // =============================================================================
 
 /**
- * Recursively pierces shadow DOMs to find the deepest element at a point.
- * document.elementFromPoint() stops at shadow hosts, so we need to
- * recursively check inside open shadow roots to find the actual target.
+ * Realm-aware HTMLElement check. Elements inside an iframe belong to that
+ * iframe's realm, so `el instanceof HTMLElement` (top realm) is false for them;
+ * we test against the element's own document's HTMLElement constructor.
+ */
+function isHTMLElement(node: Element): node is HTMLElement {
+  const view = node.ownerDocument?.defaultView;
+  return view ? node instanceof view.HTMLElement : node instanceof HTMLElement;
+}
+
+/**
+ * Checks whether an iframe's contentDocument is accessible (same-origin).
+ * Cross-origin iframes return null or throw a SecurityError on access.
+ */
+export function isSameOriginIframe(iframe: HTMLIFrameElement): boolean {
+  try {
+    const doc = iframe.contentDocument;
+    return doc !== null && doc.body !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Gets all accessible (same-origin) iframes reachable from a document,
+ * including those nested inside other same-origin iframes.
+ */
+export function getAllSameOriginIframes(doc: Document = document): HTMLIFrameElement[] {
+  const iframes: HTMLIFrameElement[] = [];
+  for (const iframe of doc.querySelectorAll("iframe")) {
+    if (isSameOriginIframe(iframe)) {
+      iframes.push(iframe);
+      iframes.push(...getAllSameOriginIframes(iframe.contentDocument!));
+    }
+  }
+  return iframes;
+}
+
+/**
+ * Accumulates the viewport offset of an iframe by walking up through any
+ * enclosing same-origin iframes.
+ */
+function getIframeViewportOffset(iframe: HTMLIFrameElement): { x: number; y: number } {
+  let x = 0;
+  let y = 0;
+  let frame: HTMLIFrameElement | null = iframe;
+  while (frame) {
+    const rect = frame.getBoundingClientRect();
+    x += rect.left;
+    y += rect.top;
+    frame = frame.ownerDocument.defaultView?.frameElement as HTMLIFrameElement | null;
+  }
+  return { x, y };
+}
+
+/**
+ * Recursively pierces shadow DOMs and same-origin iframes to find the deepest
+ * element at a viewport point. document.elementFromPoint() stops at shadow
+ * hosts and iframe elements, so we recurse into open shadow roots and
+ * same-origin iframe contentDocuments to find the actual target.
  */
 function deepElementFromPoint(x: number, y: number): HTMLElement | null {
   let element = document.elementFromPoint(x, y) as HTMLElement | null;
   if (!element) return null;
 
-  // Keep drilling down through shadow roots
-  while (element?.shadowRoot) {
-    const deeper = element.shadowRoot.elementFromPoint(x, y) as HTMLElement | null;
-    if (!deeper || deeper === element) break;
-    element = deeper;
+  let changed = true;
+  while (changed) {
+    changed = false;
+
+    while (element?.shadowRoot) {
+      const deeper = element.shadowRoot.elementFromPoint(x, y) as HTMLElement | null;
+      if (!deeper || deeper === element) break;
+      element = deeper;
+      changed = true;
+    }
+
+    if (element?.tagName === "IFRAME" && isSameOriginIframe(element as HTMLIFrameElement)) {
+      const iframe = element as HTMLIFrameElement;
+      const rect = iframe.getBoundingClientRect();
+      const deeper = iframe.contentDocument!.elementFromPoint(
+        x - rect.left,
+        y - rect.top,
+      ) as HTMLElement | null;
+      if (deeper && deeper !== iframe) {
+        element = deeper;
+        changed = true;
+      }
+    }
   }
 
   return element;
+}
+
+/**
+ * Converts an element's bounding rect to top-level viewport coordinates,
+ * accounting for the element living inside one or more nested same-origin
+ * iframes. For elements in the top document this equals getBoundingClientRect().
+ */
+function getViewportRect(element: HTMLElement): DOMRect {
+  const rect = element.getBoundingClientRect();
+  const frame = element.ownerDocument.defaultView?.frameElement as HTMLIFrameElement | null;
+  if (!frame) return rect;
+  const offset = getIframeViewportOffset(frame);
+  return new DOMRect(rect.x + offset.x, rect.y + offset.y, rect.width, rect.height);
+}
+
+/**
+ * Like document.querySelectorAll but also searches inside same-origin iframes.
+ * Returned elements' getBoundingClientRect() values are in their own document's
+ * coordinate space, so callers needing viewport positions should use getViewportRect().
+ */
+export function querySelectorAllWithIframes(selector: string): HTMLElement[] {
+  const results: HTMLElement[] = [];
+  const collect = (doc: Document) => {
+    for (const el of doc.querySelectorAll(selector)) {
+      if (isHTMLElement(el)) results.push(el);
+    }
+    for (const iframe of doc.querySelectorAll("iframe")) {
+      if (isSameOriginIframe(iframe)) collect(iframe.contentDocument!);
+    }
+  };
+  collect(document);
+  return results;
+}
+
+/**
+ * Like document.elementsFromPoint but also checks same-origin iframes.
+ * Coordinates are in top-level viewport space.
+ */
+function elementsFromPointWithIframes(x: number, y: number): HTMLElement[] {
+  const results: HTMLElement[] = [];
+  for (const el of document.elementsFromPoint(x, y)) {
+    if (isHTMLElement(el)) results.push(el);
+  }
+
+  for (const iframe of getAllSameOriginIframes()) {
+    const offset = getIframeViewportOffset(iframe);
+    const iframeX = x - offset.x;
+    const iframeY = y - offset.y;
+    if (iframeX < 0 || iframeY < 0) continue;
+    for (const el of iframe.contentDocument!.elementsFromPoint(iframeX, iframeY)) {
+      if (isHTMLElement(el)) results.push(el);
+    }
+  }
+
+  return results;
 }
 
 function isElementFixed(element: HTMLElement): boolean {
@@ -403,7 +549,7 @@ export function PageFeedbackToolbarCSS({
       width: number;
       height: number;
     }>;
-    // Element references for cmd+shift+click multi-select (for live position queries)
+    // Element references for modifier-click multi-select (for live position queries)
     multiSelectElements?: HTMLElement[];
     // Element reference for single-select (for live position queries)
     targetElement?: HTMLElement;
@@ -419,7 +565,7 @@ export function PageFeedbackToolbarCSS({
     useState<HTMLElement | null>(null);
   const [hoveredTargetElements, setHoveredTargetElements] = useState<
     HTMLElement[]
-  >([]); // For cmd+shift+click multi-select hover
+  >([]); // For modifier-click multi-select hover
   const [deletingMarkerId, setDeletingMarkerId] = useState<string | null>(null);
   const [renumberFrom, setRenumberFrom] = useState<number | null>(null);
   const [editingAnnotation, setEditingAnnotation] = useState<Annotation | null>(
@@ -429,7 +575,7 @@ export function PageFeedbackToolbarCSS({
     useState<HTMLElement | null>(null);
   const [editingTargetElements, setEditingTargetElements] = useState<
     HTMLElement[]
-  >([]); // For cmd+shift+click multi-select
+  >([]); // For modifier-click multi-select
   const [scrollY, setScrollY] = useState(0);
   const [isScrolling, setIsScrolling] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -510,17 +656,11 @@ export function PageFeedbackToolbarCSS({
     null,
   );
 
-  // Cmd+shift+click multi-select state
+  // Primary-modifier multi-select state
   const [pendingMultiSelectElements, setPendingMultiSelectElements] = useState<
-    Array<{
-      element: HTMLElement;
-      rect: DOMRect;
-      name: string;
-      path: string;
-      reactComponents?: string;
-    }>
+    PendingMultiSelectElement[]
   >([]);
-  const modifiersHeldRef = useRef({ cmd: false, shift: false });
+  const multiSelectModifiersHeldRef = useRef({ meta: false, ctrl: false });
 
   // Hide tooltips after button click until mouse leaves
   const hideTooltipsUntilMouseLeave = () => {
@@ -1725,7 +1865,25 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
     }
   }, [isFrozen, freezeAnimations, unfreezeAnimations]);
 
-  // Create pending annotation from cmd+shift+click multi-select
+  const appendPendingMultiSelectElements = useCallback(
+    (elements: PendingMultiSelectElement[]) => {
+      if (elements.length === 0) return;
+
+      setPendingMultiSelectElements((prev) => {
+        const next = [...prev];
+        for (const item of elements) {
+          if (next.some((existing) => existing.element === item.element)) {
+            continue;
+          }
+          next.push(item);
+        }
+        return next;
+      });
+    },
+    [],
+  );
+
+  // Create pending annotation from modifier-click multi-select
   const createMultiSelectPendingAnnotation = useCallback(() => {
     if (pendingMultiSelectElements.length === 0) return;
 
@@ -1841,7 +1999,7 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
       setHoverInfo(null);
       setShowSettings(false); // Close settings when toolbar closes
       setPendingMultiSelectElements([]); // Clear multi-select
-      modifiersHeldRef.current = { cmd: false, shift: false }; // Reset modifier tracking
+      multiSelectModifiersHeldRef.current = { meta: false, ctrl: false }; // Reset modifier tracking
       if (isFrozen) {
         unfreezeAnimations();
       }
@@ -1899,6 +2057,19 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
       return () => document.documentElement.removeAttribute("data-drawing-hover");
     }
   }, [hoveredDrawingIdx, isActive]);
+
+  // Pencil cursor for the draw canvas (setProperty to override the !important rule)
+  useEffect(() => {
+    const canvas = drawCanvasRef.current;
+    if (!canvas) return;
+    if (isDrawMode && hoveredDrawingIdx == null) {
+      canvas.style.setProperty("cursor", PENCIL_CURSOR, "important");
+    } else if (isDrawMode) {
+      canvas.style.setProperty("cursor", "pointer", "important");
+    } else {
+      canvas.style.removeProperty("cursor");
+    }
+  }, [isDrawMode, hoveredDrawingIdx]);
 
   // Handle mouse move
   useEffect(() => {
@@ -2005,8 +2176,12 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
       if (closestCrossingShadow(target, "[data-annotation-popup]")) return;
       if (closestCrossingShadow(target, "[data-annotation-marker]")) return;
 
-      // Handle cmd+shift+click for multi-element selection
-      if (e.metaKey && e.shiftKey && !pendingAnnotation && !editingAnnotation) {
+      // Handle modifier-click for multi-element selection
+      if (
+        isPrimaryMultiSelectModifierActive(e) &&
+        !pendingAnnotation &&
+        !editingAnnotation
+      ) {
         e.preventDefault();
         e.stopPropagation();
 
@@ -2128,9 +2303,30 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
       setHoverInfo(null);
     };
 
+    // macOS fires `contextmenu` (not a usable click) for Ctrl+Click, which would
+    // pop the OS menu mid multi-select. Suppress it while the primary modifier is held.
+    const handleContextMenu = (e: MouseEvent) => {
+      const target = (e.composedPath()[0] || e.target) as HTMLElement;
+      if (closestCrossingShadow(target, "[data-feedback-toolbar]")) return;
+      if (closestCrossingShadow(target, "[data-annotation-popup]")) return;
+      if (closestCrossingShadow(target, "[data-annotation-marker]")) return;
+
+      if (
+        isPrimaryMultiSelectModifierActive(e) &&
+        !pendingAnnotation &&
+        !editingAnnotation
+      ) {
+        e.preventDefault();
+      }
+    };
+
     // Use capture phase to intercept before element handlers
     document.addEventListener("click", handleClick, true);
-    return () => document.removeEventListener("click", handleClick, true);
+    document.addEventListener("contextmenu", handleContextMenu, true);
+    return () => {
+      document.removeEventListener("click", handleClick, true);
+      document.removeEventListener("contextmenu", handleContextMenu, true);
+    };
   }, [
     isActive,
     isDrawMode,
@@ -2142,38 +2338,36 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
     pendingMultiSelectElements,
   ]);
 
-  // Cmd+shift+click multi-select: keyup listener for modifier release
+  // Modifier-click multi-select: keyup listener for modifier release
   useEffect(() => {
     if (!isActive) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Meta") modifiersHeldRef.current.cmd = true;
-      if (e.key === "Shift") modifiersHeldRef.current.shift = true;
+      if (e.key === "Meta") multiSelectModifiersHeldRef.current.meta = true;
+      if (e.key === "Control") multiSelectModifiersHeldRef.current.ctrl = true;
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
-      const wasHoldingBoth =
-        modifiersHeldRef.current.cmd && modifiersHeldRef.current.shift;
+      const wasHoldingModifier =
+        multiSelectModifiersHeldRef.current.meta ||
+        multiSelectModifiersHeldRef.current.ctrl;
 
-      if (e.key === "Meta") modifiersHeldRef.current.cmd = false;
-      if (e.key === "Shift") modifiersHeldRef.current.shift = false;
+      if (e.key === "Meta") multiSelectModifiersHeldRef.current.meta = false;
+      if (e.key === "Control") multiSelectModifiersHeldRef.current.ctrl = false;
 
-      const nowHoldingBoth =
-        modifiersHeldRef.current.cmd && modifiersHeldRef.current.shift;
+      const nowHoldingModifier =
+        multiSelectModifiersHeldRef.current.meta ||
+        multiSelectModifiersHeldRef.current.ctrl;
 
       // Released modifier while holding elements → trigger popup
-      if (
-        wasHoldingBoth &&
-        !nowHoldingBoth &&
-        pendingMultiSelectElements.length > 0
-      ) {
+      if (wasHoldingModifier && !nowHoldingModifier && pendingMultiSelectElements.length > 0) {
         createMultiSelectPendingAnnotation();
       }
     };
 
     // Reset modifier state AND clear selection when window loses focus (e.g., cmd+tab away)
     const handleBlur = () => {
-      modifiersHeldRef.current = { cmd: false, shift: false };
+      multiSelectModifiersHeldRef.current = { meta: false, ctrl: false };
       setPendingMultiSelectElements([]);
     };
 
@@ -2240,7 +2434,10 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
         "SUP",
       ]);
 
-      if (textTags.has(target.tagName) || target.isContentEditable) {
+      if (
+        !isPrimaryMultiSelectModifierActive(e) &&
+        (textTags.has(target.tagName) || target.isContentEditable)
+      ) {
         return;
       }
 
@@ -2313,19 +2510,19 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
         ];
 
         for (const [x, y] of points) {
-          const elements = document.elementsFromPoint(x, y);
+          const elements = elementsFromPointWithIframes(x, y);
           for (const el of elements) {
             if (el instanceof HTMLElement) candidateElements.add(el);
           }
         }
 
-        // Also check nearby elements
-        const nearbyElements = document.querySelectorAll(
+        // Also check nearby elements (including inside same-origin iframes)
+        const nearbyElements = querySelectorAllWithIframes(
           "button, a, input, img, p, h1, h2, h3, h4, h5, h6, li, label, td, th, div, span, section, article, aside, nav",
         );
         for (const el of nearbyElements) {
           if (el instanceof HTMLElement) {
-            const rect = el.getBoundingClientRect();
+            const rect = getViewportRect(el);
             // Check if element's center point is inside or if it overlaps significantly
             const centerX = rect.left + rect.width / 2;
             const centerY = rect.top + rect.height / 2;
@@ -2485,7 +2682,7 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
         const selector =
           "button, a, input, img, p, h1, h2, h3, h4, h5, h6, li, label, td, th";
 
-        document.querySelectorAll(selector).forEach((el) => {
+        querySelectorAllWithIframes(selector).forEach((el) => {
           if (!(el instanceof HTMLElement)) return;
           if (
             closestCrossingShadow(el, "[data-feedback-toolbar]") ||
@@ -2493,7 +2690,7 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
           )
             return;
 
-          const rect = el.getBoundingClientRect();
+          const rect = getViewportRect(el);
           if (
             rect.width > window.innerWidth * 0.8 &&
             rect.height > window.innerHeight * 0.5
@@ -2522,63 +2719,83 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
 
         const x = (e.clientX / window.innerWidth) * 100;
         const y = e.clientY + window.scrollY;
+        const shouldAccumulateMultiSelect =
+          isPrimaryMultiSelectModifierActive(e) &&
+          !pendingAnnotation &&
+          !editingAnnotation;
 
         if (finalElements.length > 0) {
-          const bounds = finalElements.reduce(
-            (acc, { rect }) => ({
-              left: Math.min(acc.left, rect.left),
-              top: Math.min(acc.top, rect.top),
-              right: Math.max(acc.right, rect.right),
-              bottom: Math.max(acc.bottom, rect.bottom),
-            }),
-            {
-              left: Infinity,
-              top: Infinity,
-              right: -Infinity,
-              bottom: -Infinity,
-            },
-          );
+          if (shouldAccumulateMultiSelect) {
+            appendPendingMultiSelectElements(
+              finalElements.map(({ element, rect }) => {
+                const { name, path, reactComponents } =
+                  identifyElementWithReact(element, effectiveReactMode);
+                return {
+                  element,
+                  rect,
+                  name,
+                  path,
+                  reactComponents: reactComponents ?? undefined,
+                };
+              }),
+            );
+          } else {
+            const bounds = finalElements.reduce(
+              (acc, { rect }) => ({
+                left: Math.min(acc.left, rect.left),
+                top: Math.min(acc.top, rect.top),
+                right: Math.max(acc.right, rect.right),
+                bottom: Math.max(acc.bottom, rect.bottom),
+              }),
+              {
+                left: Infinity,
+                top: Infinity,
+                right: -Infinity,
+                bottom: -Infinity,
+              },
+            );
 
-          const elementNames = finalElements
-            .slice(0, 5)
-            .map(({ element }) => identifyElement(element).name)
-            .join(", ");
-          const suffix =
-            finalElements.length > 5
-              ? ` +${finalElements.length - 5} more`
-              : "";
+            const elementNames = finalElements
+              .slice(0, 5)
+              .map(({ element }) => identifyElement(element).name)
+              .join(", ");
+            const suffix =
+              finalElements.length > 5
+                ? ` +${finalElements.length - 5} more`
+                : "";
 
-          // Capture computed styles from first element - filtered for popup, full for forensic output
-          const firstElement = finalElements[0].element;
-          const firstElementComputedStyles =
-            getDetailedComputedStyles(firstElement);
-          const firstElementComputedStylesStr =
-            getForensicComputedStyles(firstElement);
+            // Capture computed styles from first element - filtered for popup, full for forensic output
+            const firstElement = finalElements[0].element;
+            const firstElementComputedStyles =
+              getDetailedComputedStyles(firstElement);
+            const firstElementComputedStylesStr =
+              getForensicComputedStyles(firstElement);
 
-          setPendingAnnotation({
-            x,
-            y,
-            clientY: e.clientY,
-            element: `${finalElements.length} elements: ${elementNames}${suffix}`,
-            elementPath: "multi-select",
-            boundingBox: {
-              x: bounds.left,
-              y: bounds.top + window.scrollY,
-              width: bounds.right - bounds.left,
-              height: bounds.bottom - bounds.top,
-            },
-            isMultiSelect: true,
-            // Forensic data from first element
-            fullPath: getFullElementPath(firstElement),
-            accessibility: getAccessibilityInfo(firstElement),
-            computedStyles: firstElementComputedStylesStr,
-            computedStylesObj: firstElementComputedStyles,
-            nearbyElements: getNearbyElements(firstElement),
-            cssClasses: getElementClasses(firstElement),
-            nearbyText: getNearbyText(firstElement),
-            sourceFile: detectSourceFile(firstElement),
-          });
-        } else {
+            setPendingAnnotation({
+              x,
+              y,
+              clientY: e.clientY,
+              element: `${finalElements.length} elements: ${elementNames}${suffix}`,
+              elementPath: "multi-select",
+              boundingBox: {
+                x: bounds.left,
+                y: bounds.top + window.scrollY,
+                width: bounds.right - bounds.left,
+                height: bounds.bottom - bounds.top,
+              },
+              isMultiSelect: true,
+              // Forensic data from first element
+              fullPath: getFullElementPath(firstElement),
+              accessibility: getAccessibilityInfo(firstElement),
+              computedStyles: firstElementComputedStylesStr,
+              computedStylesObj: firstElementComputedStyles,
+              nearbyElements: getNearbyElements(firstElement),
+              cssClasses: getElementClasses(firstElement),
+              nearbyText: getNearbyText(firstElement),
+              sourceFile: detectSourceFile(firstElement),
+            });
+          }
+        } else if (!shouldAccumulateMultiSelect) {
           // No elements selected, but allow annotation on empty area
           const width = Math.abs(right - left);
           const height = Math.abs(bottom - top);
@@ -2617,7 +2834,14 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
 
     document.addEventListener("mouseup", handleMouseUp);
     return () => document.removeEventListener("mouseup", handleMouseUp);
-  }, [isActive, isDragging]);
+  }, [
+    isActive,
+    isDragging,
+    pendingAnnotation,
+    editingAnnotation,
+    effectiveReactMode,
+    appendPendingMultiSelectElements,
+  ]);
 
   // Fire webhook for annotation events - returns true on success, false on failure
   const fireWebhook = useCallback(
@@ -2836,7 +3060,7 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
           const centerX = bb.x + bb.width / 2;
           const centerY = bb.y + bb.height / 2 - window.scrollY;
           // Use elementsFromPoint to look through the marker if it's covering
-          const allEls = document.elementsFromPoint(centerX, centerY);
+          const allEls = elementsFromPointWithIframes(centerX, centerY);
           const el = allEls.find(
             (e) => !e.closest('[data-annotation-marker]') && !e.closest('[data-agentation-root]'),
           ) as HTMLElement | undefined;
@@ -3448,7 +3672,13 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
           }
           return;
         }
-        // Exit draw mode first if active
+        // In draw mode with a popup open: close the popup but stay in draw mode
+        if (isDrawMode && (pendingAnnotation || editingAnnotation)) {
+          if (pendingAnnotation) cancelAnnotation();
+          if (editingAnnotation) cancelEditAnnotation();
+          return;
+        }
+        // Exit draw mode if active (no popup open)
         if (isDrawMode) {
           setIsDrawMode(false);
           return;
@@ -3557,6 +3787,9 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
     designPlacements,
     rearrangeState,
     pendingAnnotation,
+    editingAnnotation,
+    cancelAnnotation,
+    cancelEditAnnotation,
     annotations.length,
     settings.webhookUrl,
     webhookUrl,
@@ -4360,7 +4593,7 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
               />
             )}
 
-          {/* Cmd+shift+click multi-select highlights (during selection, before releasing modifiers) */}
+          {/* Modifier-click multi-select highlights (during selection, before releasing modifiers) */}
           {pendingMultiSelectElements
             .filter((item) => document.contains(item.element))
             .map((item, index) => {
@@ -4401,7 +4634,7 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
               );
               if (!hoveredAnnotation?.boundingBox) return null;
 
-              // Render individual element boxes if available (cmd+shift+click multi-select)
+              // Render individual element boxes if available (modifier-click multi-select)
               if (hoveredAnnotation.elementBoundingBoxes?.length) {
                 // Use live positions from hoveredTargetElements when available
                 if (hoveredTargetElements.length > 0) {

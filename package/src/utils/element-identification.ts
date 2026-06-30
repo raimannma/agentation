@@ -55,6 +55,41 @@ export function getShadowHost(element: Element): Element | null {
 // Element Path Utilities
 // =============================================================================
 
+// Intentional, stable locators that agents and test tooling rely on, in priority order.
+const STABLE_DATA_ATTRS = [
+  "data-testid",
+  "data-test",
+  "data-cy",
+  "data-qa",
+  "data-component",
+];
+
+// Framework-internal data-* attributes that are noisy or unstable across renders.
+const NOISY_DATA_ATTR = /^data-(reactid|react-|v-|n-|svelte|astro|hk|turbo)/;
+
+/**
+ * Picks the most useful data-* attribute for an element as a selector fragment
+ * (e.g. `[data-testid="submit"]`), or null when none is worth including.
+ * Prefers well-known test/component hooks, then falls back to the first
+ * meaningful non-framework data-* attribute.
+ */
+function getStableDataAttr(element: Element): string | null {
+  for (const name of STABLE_DATA_ATTRS) {
+    const value = element.getAttribute(name);
+    if (value) return `[${name}="${value}"]`;
+  }
+  for (const attr of Array.from(element.attributes)) {
+    if (
+      attr.name.startsWith("data-") &&
+      attr.value &&
+      !NOISY_DATA_ATTR.test(attr.name)
+    ) {
+      return `[${attr.name}="${attr.value}"]`;
+    }
+  }
+  return null;
+}
+
 /**
  * Gets a readable path for an element (e.g., "article > section > p")
  * Supports elements inside shadow DOM by crossing shadow boundaries.
@@ -81,6 +116,12 @@ export function getElementPath(target: HTMLElement, maxDepth = 4): string {
       if (meaningfulClass) {
         identifier = `.${meaningfulClass.split("_")[0]}`;
       }
+    }
+
+    // Append a stable data-* locator when present (helps agents target elements)
+    const dataAttr = getStableDataAttr(current);
+    if (dataAttr) {
+      identifier += dataAttr;
     }
 
     // Mark shadow boundary crossings

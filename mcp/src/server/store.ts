@@ -69,6 +69,16 @@ function createMemoryStore(): AFSStore {
   const annotations = new Map<string, Annotation>();
   const events: AFSEvent[] = [];
 
+  // Cap retained events to avoid unbounded memory growth in long-running processes.
+  const MAX_EVENTS = 10000;
+
+  function addEvent(event: AFSEvent): void {
+    events.push(event);
+    if (events.length > MAX_EVENTS) {
+      events.splice(0, events.length - MAX_EVENTS);
+    }
+  }
+
   function generateId(): string {
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   }
@@ -85,7 +95,7 @@ function createMemoryStore(): AFSStore {
       sessions.set(session.id, session);
 
       const event = eventBus.emit("session.created", session.id, session);
-      events.push(event);
+      addEvent(event);
 
       return session;
     },
@@ -117,7 +127,7 @@ function createMemoryStore(): AFSStore {
 
       const eventType = status === "closed" ? "session.closed" : "session.updated";
       const event = eventBus.emit(eventType, id, session);
-      events.push(event);
+      addEvent(event);
 
       return session;
     },
@@ -144,7 +154,7 @@ function createMemoryStore(): AFSStore {
       annotations.set(annotation.id, annotation);
 
       const event = eventBus.emit("annotation.created", sessionId, annotation);
-      events.push(event);
+      addEvent(event);
 
       return annotation;
     },
@@ -164,7 +174,7 @@ function createMemoryStore(): AFSStore {
 
       if (annotation.sessionId) {
         const event = eventBus.emit("annotation.updated", annotation.sessionId, annotation);
-        events.push(event);
+        addEvent(event);
       }
 
       return annotation;
@@ -188,7 +198,7 @@ function createMemoryStore(): AFSStore {
 
       if (annotation.sessionId) {
         const event = eventBus.emit("annotation.updated", annotation.sessionId, annotation);
-        events.push(event);
+        addEvent(event);
       }
 
       return annotation;
@@ -217,7 +227,7 @@ function createMemoryStore(): AFSStore {
 
       if (annotation.sessionId) {
         const event = eventBus.emit("thread.message", annotation.sessionId, message);
-        events.push(event);
+        addEvent(event);
       }
 
       return annotation;
@@ -243,7 +253,7 @@ function createMemoryStore(): AFSStore {
 
       if (annotation.sessionId) {
         const event = eventBus.emit("annotation.deleted", annotation.sessionId, annotation);
-        events.push(event);
+        addEvent(event);
       }
 
       return annotation;
