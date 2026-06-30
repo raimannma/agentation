@@ -9,18 +9,18 @@
   },
   "dependencies": {
     "agentation": "workspace:*",
-    "beautiful-mermaid": "^0.1.2",
-    "framer-motion": "^12.28.1",
-    "next": "^14.0.0",
+    "beautiful-mermaid": "^1.1.3",
+    "framer-motion": "^12.42.0",
+    "next": "^16.2.9",
     "prism-react-renderer": "^2.4.1",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@types/react": "^18.2.0",
-    "@types/react-dom": "^18.2.0",
-    "sass": "^1.69.0",
-    "typescript": "^5.0.0"
+    "@types/node": "^26.0.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "sass": "^1.101.0",
+    "typescript": "^6.0.3"
   }
 }

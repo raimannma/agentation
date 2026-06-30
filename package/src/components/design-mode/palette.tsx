@@ -685,7 +685,7 @@ function RollingCount({ value, suffix }: { value: number; suffix?: string }) {
   const [dir, setDir] = useState<"up" | "down">("up");
   const cur = useRef(value);
   const curSuffix = useRef(suffix);
-  const timer = useRef<ReturnType<typeof originalSetTimeout>>();
+  const timer = useRef<ReturnType<typeof originalSetTimeout> | undefined>(undefined);
 
   const suffixChanged = prev !== null && prevSuffix !== suffix;
 
@@ -779,7 +779,7 @@ export function DesignPalette({
   const lastFooterCount = useRef(0);
   const lastFooterSuffix = useRef("");
   const rafRef = useRef(0);
-  const exitTimerRef = useRef<ReturnType<typeof originalSetTimeout>>();
+  const exitTimerRef = useRef<ReturnType<typeof originalSetTimeout> | undefined>(undefined);
   const placeScrollRef = useRef<HTMLDivElement>(null);
   const [placeFade, setPlaceFade] = useState("");
 
