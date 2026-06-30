@@ -2157,9 +2157,30 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
       setHoverInfo(null);
     };
 
+    // macOS fires `contextmenu` (not a usable click) for Ctrl+Click, which would
+    // pop the OS menu mid multi-select. Suppress it while the primary modifier is held.
+    const handleContextMenu = (e: MouseEvent) => {
+      const target = (e.composedPath()[0] || e.target) as HTMLElement;
+      if (closestCrossingShadow(target, "[data-feedback-toolbar]")) return;
+      if (closestCrossingShadow(target, "[data-annotation-popup]")) return;
+      if (closestCrossingShadow(target, "[data-annotation-marker]")) return;
+
+      if (
+        isPrimaryMultiSelectModifierActive(e) &&
+        !pendingAnnotation &&
+        !editingAnnotation
+      ) {
+        e.preventDefault();
+      }
+    };
+
     // Use capture phase to intercept before element handlers
     document.addEventListener("click", handleClick, true);
-    return () => document.removeEventListener("click", handleClick, true);
+    document.addEventListener("contextmenu", handleContextMenu, true);
+    return () => {
+      document.removeEventListener("click", handleClick, true);
+      document.removeEventListener("contextmenu", handleContextMenu, true);
+    };
   }, [
     isActive,
     isDrawMode,
