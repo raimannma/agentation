@@ -28,7 +28,7 @@ Set up the Agentation annotation toolbar in this project.
    import { Agentation } from "agentation";
 
    // Add inside the body, after children:
-   {process.env.NODE_ENV === "development" && <Agentation />}
+   {process.env.NODE_ENV === "development" && <Agentation endpoint="http://localhost:4747" />}
    ```
 
    For Next.js Pages Router, add to _app:
@@ -36,7 +36,7 @@ Set up the Agentation annotation toolbar in this project.
    import { Agentation } from "agentation";
 
    // Add after Component:
-   {process.env.NODE_ENV === "development" && <Agentation />}
+   {process.env.NODE_ENV === "development" && <Agentation endpoint="http://localhost:4747" />}
    ```
 
 5. **Confirm component setup**
