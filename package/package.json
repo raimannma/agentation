@@ -2,7 +2,10 @@
   "name": "agentation",
   "version": "3.0.2",
   "description": "Visual feedback for AI coding agents",
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/index.js",
+    "./dist/index.mjs"
+  ],
   "license": "PolyForm-Shield-1.0.0",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",

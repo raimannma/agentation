@@ -28,6 +28,7 @@ export function generateOutput(
   annotations: Annotation[],
   pathname: string,
   detailLevel: OutputDetailLevel = "standard",
+  appName?: string,
 ): string {
   if (annotations.length === 0) return "";
 
@@ -36,7 +37,7 @@ export function generateOutput(
       ? `${window.innerWidth}×${window.innerHeight}`
       : "unknown";
 
-  let output = `## Page Feedback: ${pathname}\n`;
+  let output = `## Page Feedback: ${appName ? `${appName} — ` : ""}${pathname}\n`;
 
   if (detailLevel === "forensic") {
     output += `\n**Environment:**\n`;

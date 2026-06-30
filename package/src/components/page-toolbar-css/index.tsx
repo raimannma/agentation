@@ -314,6 +314,10 @@ export type PageFeedbackToolbarCSSProps = {
   webhookUrl?: string;
   /** Custom class name applied to the toolbar container. Use to adjust positioning or z-index. */
   className?: string;
+  /** App name to include in the feedback output header, helping agents disambiguate which app the feedback is for. */
+  appName?: string;
+  /** Append the URL hash to the storage/session key so hash-routed SPAs keep annotations per route. Defaults to false. */
+  useHashLocation?: boolean;
 };
 
 /** Alias for PageFeedbackToolbarCSSProps */
@@ -339,6 +343,8 @@ export function PageFeedbackToolbarCSS({
   onSessionCreated,
   webhookUrl,
   className: userClassName,
+  appName,
+  useHashLocation = false,
 }: PageFeedbackToolbarCSSProps = {}) {
   const [isActive, setIsActive] = useState(false);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
@@ -632,8 +638,22 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
   const editPopupRef = useRef<AnnotationPopupCSSHandle>(null);
   const scrollTimeoutRef = useRef<ReturnType<typeof originalSetTimeout> | null>(null);
 
-  const pathname =
-    typeof window !== "undefined" ? window.location.pathname : "/";
+  const getLocationKey = useCallback(() => {
+    if (typeof window === "undefined") return "/";
+    return useHashLocation
+      ? window.location.pathname + window.location.hash
+      : window.location.pathname;
+  }, [useHashLocation]);
+
+  const [pathname, setPathname] = useState(getLocationKey);
+
+  // Reload annotations when the hash route changes (hash-routed SPAs).
+  useEffect(() => {
+    if (!useHashLocation) return;
+    const onHashChange = () => setPathname(getLocationKey());
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, [useHashLocation, getLocationKey]);
 
   // Handle showSettings changes with exit animation
   useEffect(() => {
@@ -753,6 +773,16 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
       );
     }
   }, [isDraggingToolbar, toolbarPosition, mounted]);
+
+  // Warn (dev only) when no endpoint is configured, so annotations silently
+  // staying local-only is discoverable instead of looking like a broken sync.
+  useEffect(() => {
+    if (!mounted || endpoint) return;
+    if (process.env.NODE_ENV === "production") return;
+    console.warn(
+      '[Agentation] No `endpoint` prop set — annotations are stored locally only and will not sync to the MCP server. Pass endpoint="http://localhost:4747" to enable agent sync.',
+    );
+  }, [mounted, endpoint]);
 
   // Initialize server session (when endpoint is provided)
   useEffect(() => {
@@ -2996,6 +3026,7 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
         annotations,
         displayUrl,
         settings.outputDetail,
+        appName,
       );
       if (!output && drawStrokes.length === 0 && designPlacements.length === 0 && !rearrangeState) return;
       if (!output) output = `## Page Feedback: ${displayUrl}\n`;
@@ -3171,6 +3202,7 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
     clearAll,
     copyToClipboard,
     onCopy,
+    appName,
   ]);
 
   // Send to webhook
@@ -3185,6 +3217,7 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
       annotations,
       displayUrl,
       settings.outputDetail,
+      appName,
     );
     if (!output && designPlacements.length === 0 && !rearrangeState) return;
     if (!output) output = `## Page Feedback: ${displayUrl}\n`;
@@ -3243,6 +3276,7 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
     effectiveReactMode,
     settings.autoClearAfterCopy,
     clearAll,
+    appName,
   ]);
 
   // Toolbar dragging - mousemove and mouseup
