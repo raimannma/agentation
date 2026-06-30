@@ -79,6 +79,20 @@ export async function syncAnnotation(
 }
 
 /**
+ * Merge a remotely-created annotation (received over SSE) into the local list,
+ * deduping by id. Prevents double-adding the server's echo of an annotation this
+ * client just created optimistically. Returns the original array reference when
+ * the annotation is already present so callers can skip a re-render.
+ */
+export function mergeCreatedAnnotation(
+  current: Annotation[],
+  incoming: Annotation
+): Annotation[] {
+  if (current.some((a) => a.id === incoming.id)) return current;
+  return [...current, incoming];
+}
+
+/**
  * Update an annotation on the server.
  */
 export async function updateAnnotation(
