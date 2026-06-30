@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, type JSX } from "react";
 import { COMPONENT_MAP, DEFAULT_SIZES, type ComponentType, type DesignPlacement } from "./types";
 import { Skeleton } from "./skeletons";
 import { AnnotationPopupCSS } from "../annotation-popup-css";
