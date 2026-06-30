@@ -68,6 +68,7 @@ import {
   syncAnnotation,
   updateAnnotation as updateAnnotationOnServer,
   deleteAnnotation as deleteAnnotationFromServer,
+  mergeCreatedAnnotation,
 } from "../../utils/sync";
 import { getReactComponentName } from "../../utils/react-detection";
 import {
@@ -1148,7 +1149,8 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
     return () => clearInterval(interval);
   }, [endpoint, mounted]);
 
-  // Listen for server-side annotation updates (e.g. resolved by agent)
+  // Listen for real-time annotation events (created/updated/deleted) from the
+  // server so changes by the agent or other clients sync into this view.
   useEffect(() => {
     if (!endpoint || !mounted || !currentSessionId) return;
 
@@ -1158,59 +1160,93 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
 
     const removedStatuses = ["resolved", "dismissed"];
 
-    const handler = (e: MessageEvent) => {
+    const removeAnnotationLocally = (id: string, kind: string | undefined) => {
+      if (kind === "placement") {
+        // Reverse-lookup: find which placementId maps to this annotation ID
+        for (const [placementId, annotationId] of placementAnnotationMap.current) {
+          if (annotationId === id) {
+            placementAnnotationMap.current.delete(placementId);
+            placementSyncedTextMap.current.delete(placementId);
+            setDesignPlacements((prev) => prev.filter((p) => p.id !== placementId));
+            break;
+          }
+        }
+      } else if (kind === "rearrange") {
+        // Reverse-lookup: find which sectionId maps to this annotation ID
+        for (const [sectionId, annotationId] of rearrangeAnnotationMap.current) {
+          if (annotationId === id) {
+            rearrangeAnnotationMap.current.delete(sectionId);
+            setRearrangeState((prev) => {
+              if (!prev) return null;
+              const remaining = prev.sections.filter((s) => s.id !== sectionId);
+              if (remaining.length === 0) return null;
+              return { ...prev, sections: remaining };
+            });
+            break;
+          }
+        }
+      } else {
+        // Feedback annotation — trigger exit animation then remove
+        setExitingMarkers((prev) => new Set(prev).add(id));
+        originalSetTimeout(() => {
+          setAnnotations((prev) => prev.filter((a) => a.id !== id));
+          setExitingMarkers((prev) => {
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+          });
+        }, 150);
+      }
+    };
+
+    const handleUpdated = (e: MessageEvent) => {
       try {
         const event = JSON.parse(e.data);
         if (removedStatuses.includes(event.payload?.status)) {
-          const id = event.payload.id as string;
-          const kind = event.payload.kind as string | undefined;
-
-          if (kind === "placement") {
-            // Reverse-lookup: find which placementId maps to this annotation ID
-            for (const [placementId, annotationId] of placementAnnotationMap.current) {
-              if (annotationId === id) {
-                placementAnnotationMap.current.delete(placementId);
-                placementSyncedTextMap.current.delete(placementId);
-                setDesignPlacements((prev) => prev.filter((p) => p.id !== placementId));
-                break;
-              }
-            }
-          } else if (kind === "rearrange") {
-            // Reverse-lookup: find which sectionId maps to this annotation ID
-            for (const [sectionId, annotationId] of rearrangeAnnotationMap.current) {
-              if (annotationId === id) {
-                rearrangeAnnotationMap.current.delete(sectionId);
-                setRearrangeState((prev) => {
-                  if (!prev) return null;
-                  const remaining = prev.sections.filter((s) => s.id !== sectionId);
-                  if (remaining.length === 0) return null;
-                  return { ...prev, sections: remaining };
-                });
-                break;
-              }
-            }
-          } else {
-            // Feedback annotation — trigger exit animation then remove
-            setExitingMarkers((prev) => new Set(prev).add(id));
-            originalSetTimeout(() => {
-              setAnnotations((prev) => prev.filter((a) => a.id !== id));
-              setExitingMarkers((prev) => {
-                const next = new Set(prev);
-                next.delete(id);
-                return next;
-              });
-            }, 150);
-          }
+          removeAnnotationLocally(
+            event.payload.id as string,
+            event.payload.kind as string | undefined
+          );
         }
       } catch {
         // Ignore parse errors
       }
     };
 
-    eventSource.addEventListener("annotation.updated", handler);
+    const handleCreated = (e: MessageEvent) => {
+      try {
+        const event = JSON.parse(e.data);
+        const annotation = event.payload as Annotation | undefined;
+        if (!annotation?.id) return;
+        // Placement/rearrange annotations have their own local state and markers;
+        // only feedback markers live in the annotations array.
+        if (annotation.kind && annotation.kind !== "feedback") return;
+        if (!isRenderableAnnotation(annotation)) return;
+        setAnnotations((prev) => mergeCreatedAnnotation(prev, annotation));
+      } catch {
+        // Ignore parse errors
+      }
+    };
+
+    const handleDeleted = (e: MessageEvent) => {
+      try {
+        const event = JSON.parse(e.data);
+        const id = event.payload?.id as string | undefined;
+        if (!id) return;
+        removeAnnotationLocally(id, event.payload.kind as string | undefined);
+      } catch {
+        // Ignore parse errors
+      }
+    };
+
+    eventSource.addEventListener("annotation.created", handleCreated);
+    eventSource.addEventListener("annotation.updated", handleUpdated);
+    eventSource.addEventListener("annotation.deleted", handleDeleted);
 
     return () => {
-      eventSource.removeEventListener("annotation.updated", handler);
+      eventSource.removeEventListener("annotation.created", handleCreated);
+      eventSource.removeEventListener("annotation.updated", handleUpdated);
+      eventSource.removeEventListener("annotation.deleted", handleDeleted);
       eventSource.close();
     };
   }, [endpoint, mounted, currentSessionId]);
@@ -2945,13 +2981,19 @@ const [settings, setSettings] = useState<ToolbarSettings>(() => {
           .then((serverAnnotation) => {
             // Update local annotation with server-assigned ID
             if (serverAnnotation.id !== newAnnotation.id) {
-              setAnnotations((prev) =>
-                prev.map((a) =>
+              setAnnotations((prev) => {
+                // The SSE "annotation.created" echo may have already added the
+                // server-id copy before this response resolved; if so, drop our
+                // optimistic copy instead of renaming it (which would duplicate).
+                if (prev.some((a) => a.id === serverAnnotation.id)) {
+                  return prev.filter((a) => a.id !== newAnnotation.id);
+                }
+                return prev.map((a) =>
                   a.id === newAnnotation.id
                     ? { ...a, id: serverAnnotation.id }
                     : a,
-                ),
-              );
+                );
+              });
               // Also update the animated markers set
               setAnimatedMarkers((prev) => {
                 const next = new Set(prev);
